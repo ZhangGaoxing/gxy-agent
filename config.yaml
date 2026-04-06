@@ -1,0 +1,48 @@
+credentials: &id001
+  phone: '测试账户'
+  password: ''
+  token: abc
+  user_id: 'abc'
+  role_key: adviser
+  batch_id: abc
+  teacher_id: abc
+  name: '测试账户'
+  school_id: abc
+schedule:
+  run_at: 08:30
+  run_on_start: false
+review:
+  reports:
+    day:
+      enabled: false
+      comment: ''
+      star_num: 5
+    week:
+      enabled: true
+      comment: ''
+      star_num: 5
+    month:
+      enabled: true
+      comment: ''
+      star_num: 5
+  replacement:
+    enabled: true
+    comment: ''
+notification:
+  pushplus:
+    enabled: false
+    token: ''
+  email:
+    enabled: false
+    smtp_server: smtp.qq.com
+    smtp_port: 465
+    use_ssl: true
+    sender: ''
+    password: ''
+    recipient: ''
+  serverchan:
+    enabled: false
+    sendkey: ''
+accounts:
+- *id001
+active_account: 0

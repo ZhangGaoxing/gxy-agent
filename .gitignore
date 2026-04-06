@@ -9,9 +9,6 @@ dist/
 build/
 *.spec
 
-# 配置文件
-config.yaml
-
 # 日志
 *.log
 gxy_agent.log
