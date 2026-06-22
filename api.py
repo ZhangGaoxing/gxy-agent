@@ -259,15 +259,15 @@ class GxyAPI:
 
     # ──────────────── 实习成绩考核相关 ────────────────
 
-    def get_pending_assessments(self) -> list:
-        """获取实习成绩考核中未打分的学生列表。"""
+    def _get_assessments(self, is_score: Any = '') -> list:
+        """获取实习成绩考核列表。"""
         all_students: list = []
         page = 1
         while True:
             body = {
                 'currPage': page,
                 'pageSize': 200,
-                'isScore': '',
+                'isScore': is_score,
                 'grade': '',
                 'batchId': self._batch_id,
                 'planId': '',
@@ -288,18 +288,24 @@ class GxyAPI:
             if len(items) < 200:
                 break
             page += 1
+        return all_students
+
+    def get_pending_assessments(self) -> list:
+        """获取实习成绩考核中未打分的学生列表。"""
+        all_students = self._get_assessments('')
         # 过滤未打分学生（isScore 为 0/False/None 表示未打分）
         pending = [s for s in all_students if not s.get('isScore')]
         logger.info('实习成绩考核：共 %d 名学生，其中未打分 %d 名', len(all_students), len(pending))
         return pending
 
-    def score_assessment(self, student_id: str, plan_id: str, score: int, comment: str = '') -> dict:
-        """对单名学生的实习成绩进行打分。
+    def get_scored_assessments(self) -> list:
+        """获取已打分的实习成绩考核列表。"""
+        scored = self._get_assessments(1)
+        logger.info('实习成绩考核：已打分 %d 名', len(scored))
+        return scored
 
-        score: 0-100 数值分数
-        流程：getMyScoreByTea → getItemInfoAlreadyScore → updateScore
-        """
-        # 1. 获取评分项目（stuItems 列表）
+    def _get_assessment_score_context(self, student_id: str, plan_id: str) -> dict:
+        """获取实习成绩考核的评分上下文。"""
         appraise_resp = self._post(
             'practice/appraise/v5/getMyScoreByTea',
             {'isWeb': 1, 'planId': plan_id, 'studentId': student_id},
@@ -308,17 +314,13 @@ class GxyAPI:
         if not stu_items:
             logger.warning('未找到评分项目: studentId=%s planId=%s', student_id, plan_id)
             return {'code': 0, 'msg': '未找到评分项目'}
-        appraise_item_id = stu_items[0].get('appraiseItemId', '')
+
+        first_item = stu_items[0]
+        appraise_item_id = first_item.get('appraiseItemId', '')
         if not appraise_item_id:
             return {'code': 0, 'msg': '评分项目无ID'}
 
-        # 取出第一个评分项的完整行对象（含 jobId / jobRoundId / scoreFloat）
-        first_item = stu_items[0]
-        # scoreFloat == -1 表示该学生尚未评过分，需要用 saveScore；已有分数则用 updateScore
         is_no_grade = (first_item.get('scoreFloat', -1) == -1)
-
-        # 2. 获取评分详情（含 onePoints 结构）
-        # 未评分用 v3/getItemInfoNoScore，已评分用 v4/getItemInfoAlreadyScore
         detail_endpoint = 'practice/appraise/v3/getItemInfoNoScore' if is_no_grade \
             else 'practice/appraise/v4/getItemInfoAlreadyScore'
         detail_body: dict = {
@@ -332,6 +334,72 @@ class GxyAPI:
             detail_body['jobRoundId'] = first_item['jobRoundId']
         detail_resp = self._post(detail_endpoint, detail_body)
         detail = detail_resp.get('data') or {}
+        return {
+            'code': 200,
+            'msg': 'success',
+            'appraise_item_id': appraise_item_id,
+            'first_item': first_item,
+            'detail': detail,
+            'is_no_grade': is_no_grade,
+        }
+
+    def get_assessment_comment(self, student_id: str, plan_id: str) -> str:
+        """读取实习成绩考核的教师评语。"""
+        context = self._get_assessment_score_context(student_id, plan_id)
+        if context.get('code') != 200:
+            raise RuntimeError(context.get('msg', '获取实习成绩考核详情失败'))
+        return str((context.get('detail') or {}).get('comment') or '').strip()
+
+    def supplement_assessment_comment(self, student_id: str, plan_id: str, comment: str) -> dict:
+        """为已打分的实习成绩考核补充教师评语。"""
+        context = self._get_assessment_score_context(student_id, plan_id)
+        if context.get('code') != 200:
+            return context
+        if context.get('is_no_grade'):
+            return {'code': 0, 'msg': '该实习成绩考核尚未打分'}
+
+        first_item = context['first_item']
+        detail = context['detail']
+        score = first_item.get('scoreFloat')
+        if score in (None, '', -1):
+            score = first_item.get('score')
+        if score in (None, '', -1):
+            score = detail.get('score')
+        if score in (None, '', -1):
+            return {'code': 0, 'msg': '缺少原始分数，无法补充评语'}
+
+        body: dict = {
+            'planId': plan_id,
+            'studentId': student_id,
+            'appraiseItemId': context['appraise_item_id'],
+            'studentItemId': detail.get('studentItemId') or '',
+            'score': int(float(score)),
+            'studentPoints': detail.get('onePoints') or [],
+            'imageList': [],
+            'imageListIdentify': detail.get('imageListIdentify') or {},
+            'teacherName': detail.get('teacherName') or self._creds.get('name', ''),
+            'teacherPhone': detail.get('teacherPhone') or self._creds.get('phone', ''),
+            'comment': comment,
+        }
+        if first_item.get('jobId'):
+            body['jobId'] = first_item['jobId']
+        if first_item.get('jobRoundId'):
+            body['jobRoundId'] = first_item['jobRoundId']
+        return self._post('practice/appraise/v3/updateScore', body)
+
+    def score_assessment(self, student_id: str, plan_id: str, score: int, comment: str = '') -> dict:
+        """对单名学生的实习成绩进行打分。
+
+        score: 0-100 数值分数
+        流程：getMyScoreByTea → getItemInfoAlreadyScore → updateScore
+        """
+        context = self._get_assessment_score_context(student_id, plan_id)
+        if context.get('code') != 200:
+            return context
+        first_item = context['first_item']
+        detail = context['detail']
+        appraise_item_id = context['appraise_item_id']
+        is_no_grade = context['is_no_grade']
 
         # 3. 提交评分
         # 未评分用 saveScore，已评分用 updateScore

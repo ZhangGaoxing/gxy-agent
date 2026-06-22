@@ -57,11 +57,18 @@ def run_job(cfg: dict, dry_run: bool = False) -> None:
         'reviewed_summary': 0,
         'commented_summary': 0,
         'scored_assessment': 0,
+        'commented_assessment': 0,
         'errors': [],
     }
 
     # ── 1. 批阅日报/周报/月报 ──
-    type_cn = {'day': '日报', 'week': '周报', 'month': '月报'}
+    type_cn = {
+        'day': '日报',
+        'week': '周报',
+        'month': '月报',
+        'summary': '总结报告',
+        'assessment': '实习成绩考核',
+    }
     if report_cfg:
         for rtype in ('day', 'week', 'month'):
             # 兼容新格式（per-type dict）和旧格式（flat dict with types list）
@@ -182,11 +189,11 @@ def run_job(cfg: dict, dry_run: bool = False) -> None:
                 try:
                     reports = api.get_reviewed_reports_without_comment(rtype)
                     if not reports:
-                        logger.info('%s：无待补充评语的已批阅报告', type_cn.get(rtype, '总结报告'))
+                        logger.info('%s：无待补充评语的已批阅报告', type_cn.get(rtype, rtype))
                         continue
 
                     logger.info('%s：待补充评语 %d 份%s',
-                                type_cn.get(rtype, '总结报告'), len(reports),
+                                type_cn.get(rtype, rtype), len(reports),
                                 '（dry-run，跳过提交）' if dry_run else '')
                     if dry_run:
                         continue
@@ -214,15 +221,15 @@ def run_job(cfg: dict, dry_run: bool = False) -> None:
                         except Exception as e:
                             logger.warning('补充报告评语 %s 失败: %s', rid, e)
                             stats['errors'].append(
-                                f'补充{type_cn.get(rtype, "总结报告")}评语({rid})失败: {e}'
+                                f'补充{type_cn.get(rtype, rtype)}评语({rid})失败: {e}'
                             )
                     stats[f'commented_{rtype}'] = ok
                     logger.info('%s：补充评语完成 %d/%d 份',
-                                type_cn.get(rtype, '总结报告'), ok, len(reports))
+                                type_cn.get(rtype, rtype), ok, len(reports))
                 except Exception as e:
-                    logger.error('获取%s补充评语列表失败: %s', type_cn.get(rtype, '总结报告'), e)
+                    logger.error('获取%s补充评语列表失败: %s', type_cn.get(rtype, rtype), e)
                     stats['errors'].append(
-                        f'获取{type_cn.get(rtype, "总结报告")}补充评语列表失败: {e}'
+                        f'获取{type_cn.get(rtype, rtype)}补充评语列表失败: {e}'
                     )
 
     # ── 5. 实习成绩考核打分 ──
@@ -258,7 +265,46 @@ def run_job(cfg: dict, dry_run: bool = False) -> None:
             logger.error('处理实习成绩考核失败: %s', e)
             stats['errors'].append(f'处理实习成绩考核失败: {e}')
 
-    # ── 5. 查询未提交/未签到学生 ──
+    # ── 6. 为已打分的实习成绩考核补充教师评语 ──
+    if supplement_cfg.get('enabled', False):
+        if not comment_choices:
+            logger.warning('补充批阅评语模式已启用，但评语文本为空，已跳过实习成绩考核补评语')
+        else:
+            try:
+                assessments = api.get_scored_assessments()
+                if not assessments:
+                    logger.info('实习成绩考核：无待补充评语的已打分记录')
+                else:
+                    logger.info('实习成绩考核：待补充评语 %d 份%s', len(assessments),
+                                '（dry-run，跳过提交）' if dry_run else '')
+                    if not dry_run:
+                        ok = 0
+                        for item in assessments:
+                            sid = item.get('studentId', '')
+                            pid = item.get('planId', '')
+                            if not sid or not pid:
+                                logger.warning('实习成绩考核缺少 studentId/planId，跳过补充评语: %s', item)
+                                continue
+                            try:
+                                if api.get_assessment_comment(sid, pid):
+                                    continue
+                                comment = random.choice(comment_choices)
+                                result = api.supplement_assessment_comment(sid, pid, comment)
+                                if result.get('code') not in (200, None):
+                                    raise RuntimeError(result.get('msg', str(result)))
+                                if not api.get_assessment_comment(sid, pid):
+                                    raise RuntimeError('接口返回成功，但回读评分详情仍未发现教师评语')
+                                ok += 1
+                            except Exception as e:
+                                logger.warning('补充实习成绩考核评语 %s 失败: %s', sid, e)
+                                stats['errors'].append(f'补充实习成绩考核评语({sid})失败: {e}')
+                        stats['commented_assessment'] = ok
+                        logger.info('实习成绩考核：补充评语完成 %d/%d 份', ok, len(assessments))
+            except Exception as e:
+                logger.error('获取实习成绩考核补充评语列表失败: %s', e)
+                stats['errors'].append(f'获取实习成绩考核补充评语列表失败: {e}')
+
+    # ── 7. 查询未提交/未签到学生 ──
     no_submit: dict = {}
     warns: list = []
     today_stat: dict = {}
@@ -310,6 +356,7 @@ def run_job(cfg: dict, dry_run: bool = False) -> None:
             f'  {"周报":<4}  {stats["commented_week"]:>4} 份',
             f'  {"月报":<4}  {stats["commented_month"]:>4} 份',
             f'  {"总结":<4}  {stats["commented_summary"]:>4} 份',
+            f'  {"考核":<4}  {stats["commented_assessment"]:>4} 份',
         ]
     else:
         lines += ['ℹ️  查询模式（dry-run），未实际提交批阅']

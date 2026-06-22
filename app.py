@@ -648,7 +648,7 @@ class App(ctk.CTk):
         ).grid(row=0, column=0, padx=(14, 6), pady=(12, 2), sticky="w")
         ctk.CTkLabel(
             supplement_frame,
-            text="自动为已批阅且暂无教师评语的日报、周报、月报、总结补充评语；每行一条，随机选取。",
+            text="自动为已批阅且暂无教师评语的日报、周报、月报、总结，以及已打分但暂无教师评语的实习成绩考核补充评语；每行一条，随机选取。",
             text_color="gray",
         ).grid(row=0, column=1, padx=(0, 14), pady=(12, 2), sticky="w")
         supplement_textbox = ctk.CTkTextbox(supplement_frame, height=100, wrap="word")
