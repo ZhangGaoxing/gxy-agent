@@ -8,6 +8,7 @@ credentials: &id001
   teacher_id: abc
   name: '测试账户'
   school_id: abc
+  plan_id: abc
 schedule:
   run_at: 08:30
   run_on_start: false
@@ -18,16 +19,43 @@ review:
       comment: ''
       star_num: 5
     week:
-      enabled: true
+      enabled: false
       comment: ''
       star_num: 5
     month:
-      enabled: true
+      enabled: false
       comment: ''
       star_num: 5
+    summary:
+      enabled: false
+      min_score: 85
+      max_score: 89
+      comment: ''
   replacement:
-    enabled: true
+    enabled: false
     comment: ''
+  assessment:
+    enabled: false
+    min_score: 85
+    max_score: 89
+    comment: ''
+  supplement_comment:
+    enabled: true
+    comment_text: '该生在实习期间工作认真负责，虚心好学，能够迅速掌握相关业务知识，展现了极强的学习能力和适应能力。
+
+      该实习生具备良好的团队协作精神，沟通顺畅，能按时保质保量完成导师交办的各项任务，具有很强的执行力。
+
+      实习期间严格遵守公司的各项规章制度，工作态度端正，踏实肯干，展现出了良好的职业素养和敬业精神。
+
+      具备扎实的专业理论基础，并能将其灵活运用于实际工作中，遇到问题能独立思考并积极寻求解决方案。
+
+      综合表现优异，待人诚恳有礼，具备较强的责任心和抗压能力，在实习岗位上发挥了积极作用。
+
+      该生工作积极主动，主观能动性强，面对繁琐的工作依然能保持耐心和细致，具有很强的可塑性。
+
+      在实习过程中展现出了优秀的沟通表达能力和组织协调能力，能够迅速融入团队并建立良好的人际关系。
+
+      勤奋务实，善于总结经验教训，能够在实践中不断提升自己的专业技能，是一名极具潜力的优秀学生。'
 notification:
   pushplus:
     enabled: false

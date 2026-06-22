@@ -20,6 +20,14 @@ def aes_encrypt(text: str) -> str:
     return binascii.hexlify(encrypted).decode('ascii').upper()
 
 
+def aes_decrypt(hex_text: str) -> str:
+    """AES-128-ECB 解密，输入大写十六进制字符串，返回明文字符串。"""
+    cipher = AES.new(_AES_KEY, AES.MODE_ECB)
+    from Crypto.Util.Padding import unpad
+    decrypted = cipher.decrypt(bytes.fromhex(hex_text))
+    return unpad(decrypted, AES.block_size).decode('utf-8')
+
+
 def make_sign(*args) -> str:
     """MD5 签名：将所有参数拼接后加盐，返回 MD5 hex 字符串。"""
     raw = ''.join(str(a) for a in args) + _SIGN_SALT

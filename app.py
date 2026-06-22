@@ -11,6 +11,7 @@ from pathlib import Path
 import yaml
 
 try:
+    import tkinter as tk
     import customtkinter as ctk
     from tkinter import messagebox
 except ImportError:
@@ -26,7 +27,7 @@ ctk.set_default_color_theme("blue")
 _IS_FROZEN = getattr(sys, "frozen", False)
 _APP_DIR = Path(sys.executable).parent if _IS_FROZEN else Path(__file__).parent
 
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 CONFIG_PATH = _APP_DIR / "config.yaml"
 
 STAR_OPTIONS = [
@@ -40,8 +41,8 @@ STAR_OPTIONS = [
 STAR_MAP = {opt: i for i, opt in enumerate(STAR_OPTIONS)}
 STAR_REV = {i: opt for i, opt in enumerate(STAR_OPTIONS)}
 
-TEST_TYPES = ["日报", "周报", "月报", "补签申请"]
-TEST_TYPE_MAP = {"日报": "day", "周报": "week", "月报": "month", "补签申请": "replace"}
+TEST_TYPES = ["日报", "周报", "月报", "补签申请", "总结报告", "实习成绩考核"]
+TEST_TYPE_MAP = {"日报": "day", "周报": "week", "月报": "month", "补签申请": "replace", "总结报告": "summary", "实习成绩考核": "assessment"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -56,6 +57,7 @@ accounts:
     user_id: ""
     role_key: adviser
     batch_id: ""
+    plan_id: ""
     teacher_id: ""
     school_id: ""
 active_account: 0
@@ -76,8 +78,21 @@ review:
       enabled: false
       comment: ""
       star_num: 5
+    summary:
+      enabled: false
+      min_score: 60
+      max_score: 100
+      comment: ""
   replacement:
     enabled: false
+    comment: ""
+  supplement_comment:
+    enabled: false
+    comment_text: ""
+  assessment:
+    enabled: false
+    min_score: 60
+    max_score: 100
     comment: ""
 notification:
   pushplus:
@@ -136,6 +151,140 @@ class UILogHandler(logging.Handler):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class CaptchaDialog(ctk.CTkToplevel):
+    """仅显示拼图验证码的独立对话框，验证通过后回调 on_verified(verif, client_uid)。"""
+
+    IMG_W = 310
+    IMG_H = 155
+
+    def __init__(self, parent, cap, on_verified):
+        super().__init__(parent)
+        self.title("拼图验证")
+        self.resizable(False, False)
+        self.grab_set()
+        self._cap = cap
+        self._on_verified = on_verified
+        self._bg_photo = None
+        self._jig_photo = None
+        self._jig_canvas_id = None
+        self._build_ui()
+        self.after(100, self._center)
+        self.after(150, lambda: self._render(cap))
+
+    def _center(self):
+        self.update_idletasks()
+        px = self.master.winfo_x() + (self.master.winfo_width() - self.winfo_width()) // 2
+        py = self.master.winfo_y() + (self.master.winfo_height() - self.winfo_height()) // 2
+        self.geometry(f"+{max(0, px)}+{max(0, py)}")
+
+    def _build_ui(self):
+        main = ctk.CTkFrame(self, fg_color='transparent')
+        main.pack(fill='both', expand=True, padx=14, pady=12)
+
+        hdr = ctk.CTkFrame(main, fg_color='transparent')
+        hdr.pack(fill='x', pady=(0, 6))
+        ctk.CTkLabel(hdr, text='🧩  拖动滑块使拼图对准缺口',
+                     font=ctk.CTkFont(size=13, weight='bold')).pack(side='left')
+        ctk.CTkButton(hdr, text='🔄 换一张', width=80, height=26,
+                      command=self._refresh).pack(side='right')
+
+        self._canvas = tk.Canvas(main, width=self.IMG_W, height=self.IMG_H,
+                                 bg='#2b2b2b', highlightthickness=0)
+        self._canvas.pack(pady=(0, 6))
+
+        self._slider_var = tk.IntVar(value=0)
+        tk.Scale(
+            main, variable=self._slider_var,
+            from_=0, to=263, orient=tk.HORIZONTAL, length=self.IMG_W,
+            showvalue=True, bg='#2b2b2b', fg='#aaaaaa',
+            troughcolor='#404040', activebackground='#1a6090',
+            highlightthickness=0, command=self._on_slider,
+        ).pack(fill='x', pady=(0, 8))
+
+        btn_row = ctk.CTkFrame(main, fg_color='transparent')
+        btn_row.pack(fill='x')
+        self._verify_btn = ctk.CTkButton(
+            btn_row, text='✅  确认验证', width=130, height=34,
+            fg_color='#2d6a2d', hover_color='#235023',
+            command=self._do_verify,
+        )
+        self._verify_btn.pack(side='right')
+        self._status_lbl = ctk.CTkLabel(btn_row, text='', text_color='gray')
+        self._status_lbl.pack(side='left')
+
+    def _render(self, cap):
+        try:
+            from PIL import ImageTk, Image
+            orig = cap.orig_img.convert('RGB').resize((self.IMG_W, self.IMG_H), Image.LANCZOS)
+            self._bg_photo = ImageTk.PhotoImage(orig)
+            self._canvas.delete('all')
+            self._canvas.create_image(0, 0, anchor='nw', image=self._bg_photo)
+            self._jig_pil = cap.jig_img.convert('RGBA')
+            self._jig_photo = ImageTk.PhotoImage(self._jig_pil)
+            self._jig_canvas_id = self._canvas.create_image(
+                self._slider_var.get(), 0, anchor='nw', image=self._jig_photo)
+        except Exception as e:
+            logging.warning('渲染验证码失败: %s', e)
+
+    def _on_slider(self, val):
+        if self._jig_canvas_id is not None:
+            self._canvas.coords(self._jig_canvas_id, int(val), 0)
+
+    def _refresh(self):
+        self._verify_btn.configure(state='disabled')
+        self._status_lbl.configure(text='正在获取新验证码...', text_color='#f0a500')
+
+        def work():
+            try:
+                from captcha import fetch_captcha
+                cap = fetch_captcha()
+                self._cap = cap
+                self.after(0, lambda: (
+                    self._slider_var.set(0),
+                    self._render(cap),
+                    self._verify_btn.configure(state='normal'),
+                    self._status_lbl.configure(text='', text_color='gray'),
+                ))
+            except Exception as exc:
+                self.after(0, lambda e=exc: (
+                    self._status_lbl.configure(text=f'刷新失败: {e}', text_color='#f44336'),
+                    self._verify_btn.configure(state='normal'),
+                ))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _do_verify(self):
+        cap = self._cap
+        if not cap:
+            return
+        x = float(self._slider_var.get())
+        self._verify_btn.configure(state='disabled')
+        self._status_lbl.configure(text='正在验证...', text_color='#f0a500')
+
+        def work():
+            try:
+                from captcha import submit_check
+                verif = submit_check(cap, x)
+                if verif:
+                    cb, uid = self._on_verified, cap.client_uid
+                    self.after(0, lambda: (cb(verif, uid), self.destroy()))
+                else:
+                    self.after(0, lambda: (
+                        self._status_lbl.configure(text='❌ 位置不对，请重新拖动', text_color='#f44336'),
+                        self._verify_btn.configure(state='normal'),
+                    ))
+            except Exception as exc:
+                self.after(0, lambda e=exc: (
+                    self._status_lbl.configure(text=f'验证失败: {e}', text_color='#f44336'),
+                    self._verify_btn.configure(state='normal'),
+                ))
+
+        threading.Thread(target=work, daemon=True).start()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class TestRow:
     """手动批阅列表中的单行 UI 组件。"""
 
@@ -169,8 +318,11 @@ class TestRow:
         if is_replace:
             date_str = (item.get("attendenceTime") or item.get("dateTime") or "")[:10]
             desc = f"补签  {date_str}"
+        elif item_type == "assessment":
+            semester = (item.get("semester") or item.get("planName") or "")[:14]
+            desc = f"考核  {semester}"
         else:
-            type_cn = {"day": "日报", "week": "周报", "month": "月报"}.get(item_type, "")
+            type_cn = {"day": "日报", "week": "周报", "month": "月报", "summary": "总结"}.get(item_type, "")
             report_time = (
                 item.get("reportTime") or item.get("startTime") or item.get("createTime") or ""
             )[:10]
@@ -182,12 +334,23 @@ class TestRow:
         self._desc_label.grid(row=0, column=2, padx=(0, 8), pady=8, sticky="w")
 
         if not is_replace:
-            # 星级选择
-            self._star_var = ctk.StringVar(value=STAR_REV.get(5, STAR_OPTIONS[5]))
-            ctk.CTkOptionMenu(
-                self.frame, variable=self._star_var, values=STAR_OPTIONS,
-                width=148, dynamic_resizing=False,
-            ).grid(row=0, column=3, padx=(0, 8), pady=8)
+            is_score_type = item_type in ("summary", "assessment")
+            if is_score_type:
+                # 数值分数输入
+                self._score_var = ctk.StringVar()
+                ctk.CTkEntry(
+                    self.frame, textvariable=self._score_var,
+                    placeholder_text="分数（0-100）", width=130,
+                ).grid(row=0, column=3, padx=(0, 8), pady=8)
+                self._star_var = None
+            else:
+                # 星级选择
+                self._score_var = None
+                self._star_var = ctk.StringVar(value=STAR_REV.get(5, STAR_OPTIONS[5]))
+                ctk.CTkOptionMenu(
+                    self.frame, variable=self._star_var, values=STAR_OPTIONS,
+                    width=148, dynamic_resizing=False,
+                ).grid(row=0, column=3, padx=(0, 8), pady=8)
 
             # 评语
             self._comment_var = ctk.StringVar()
@@ -199,12 +362,13 @@ class TestRow:
             btn_col = 5
         else:
             self._star_var = None
+            self._score_var = None
             self._comment_var = None
             self.frame.columnconfigure(3, weight=1)
             btn_col = 4
 
         # 操作按钮
-        btn_text = "审  批" if is_replace else "批  阅"
+        btn_text = "审  批" if is_replace else ("打  分" if item_type == "assessment" else "批  阅")
         self._btn = ctk.CTkButton(
             self.frame, text=btn_text, width=76, height=30,
             fg_color="#1a5f7a", hover_color="#144d63",
@@ -232,6 +396,16 @@ class TestRow:
         if self._star_var is None:
             return 0
         return STAR_MAP.get(self._star_var.get(), 0)
+
+    def get_score(self) -> int:
+        """获取数值分数（0-100），未填写或无效返回 -1。"""
+        if self._score_var is None:
+            return -1
+        try:
+            v = int(self._score_var.get())
+            return max(0, min(100, v))
+        except (ValueError, TypeError):
+            return -1
 
     def get_comment(self) -> str:
         if self._comment_var is None:
@@ -396,6 +570,92 @@ class App(ctk.CTk):
 
         self._review_vars["replacement"] = {
             "enabled": rep_enabled, "comment": rep_comment_var,
+        }
+
+        # 总结报告打分
+        summary_sec = (reports_cfg.get("summary") or {}) if isinstance(reports_cfg, dict) else {}
+        sum_frame = ctk.CTkFrame(tab)
+        sum_frame.grid(row=4, column=0, sticky="ew", padx=4, pady=4)
+        sum_frame.columnconfigure(6, weight=1)
+
+        sum_enabled = ctk.BooleanVar(value=bool(summary_sec.get("enabled", False)))
+        sum_min = ctk.StringVar(value=str(summary_sec.get("min_score", 60)))
+        sum_max = ctk.StringVar(value=str(summary_sec.get("max_score", 100)))
+        sum_comment_var = ctk.StringVar(value=str(summary_sec.get("comment", "") or ""))
+
+        ctk.CTkCheckBox(
+            sum_frame, text="批阅总结报告", variable=sum_enabled, width=110,
+        ).grid(row=0, column=0, padx=(14, 6), pady=12, sticky="w")
+        ctk.CTkLabel(sum_frame, text="分数范围：").grid(row=0, column=1, padx=(6, 2), pady=12)
+        ctk.CTkEntry(sum_frame, textvariable=sum_min, width=60).grid(
+            row=0, column=2, padx=(0, 4), pady=12)
+        ctk.CTkLabel(sum_frame, text="~").grid(row=0, column=3, padx=4, pady=12)
+        ctk.CTkEntry(sum_frame, textvariable=sum_max, width=60).grid(
+            row=0, column=4, padx=(0, 10), pady=12)
+        ctk.CTkLabel(sum_frame, text="批阅评语：").grid(row=0, column=5, padx=(6, 2), pady=12)
+        ctk.CTkEntry(
+            sum_frame, textvariable=sum_comment_var,
+            placeholder_text="留空则不填写评语",
+        ).grid(row=0, column=6, padx=(0, 14), pady=12, sticky="ew")
+
+        self._review_vars["summary"] = {
+            "enabled": sum_enabled, "min_score": sum_min,
+            "max_score": sum_max, "comment": sum_comment_var,
+        }
+
+        # 实习成绩考核打分
+        assess_sec = review_cfg.get("assessment", {})
+        assess_frame = ctk.CTkFrame(tab)
+        assess_frame.grid(row=5, column=0, sticky="ew", padx=4, pady=4)
+        assess_frame.columnconfigure(6, weight=1)
+
+        assess_enabled = ctk.BooleanVar(value=bool(assess_sec.get("enabled", False)))
+        assess_min = ctk.StringVar(value=str(assess_sec.get("min_score", 60)))
+        assess_max = ctk.StringVar(value=str(assess_sec.get("max_score", 100)))
+        assess_comment_var = ctk.StringVar(value=str(assess_sec.get("comment", "") or ""))
+
+        ctk.CTkCheckBox(
+            assess_frame, text="实习成绩考核", variable=assess_enabled, width=110,
+        ).grid(row=0, column=0, padx=(14, 6), pady=12, sticky="w")
+        ctk.CTkLabel(assess_frame, text="分数范围：").grid(row=0, column=1, padx=(6, 2), pady=12)
+        ctk.CTkEntry(assess_frame, textvariable=assess_min, width=60).grid(
+            row=0, column=2, padx=(0, 4), pady=12)
+        ctk.CTkLabel(assess_frame, text="~").grid(row=0, column=3, padx=4, pady=12)
+        ctk.CTkEntry(assess_frame, textvariable=assess_max, width=60).grid(
+            row=0, column=4, padx=(0, 10), pady=12)
+        ctk.CTkLabel(assess_frame, text="打分备注：").grid(row=0, column=5, padx=(6, 2), pady=12)
+        ctk.CTkEntry(
+            assess_frame, textvariable=assess_comment_var,
+            placeholder_text="留空则不填写备注",
+        ).grid(row=0, column=6, padx=(0, 14), pady=12, sticky="ew")
+
+        self._review_vars["assessment"] = {
+            "enabled": assess_enabled, "min_score": assess_min,
+            "max_score": assess_max, "comment": assess_comment_var,
+        }
+
+        # 已批阅报告补充评语
+        supplement_sec = review_cfg.get("supplement_comment", {})
+        supplement_frame = ctk.CTkFrame(tab)
+        supplement_frame.grid(row=6, column=0, sticky="ew", padx=4, pady=4)
+        supplement_frame.columnconfigure(0, weight=1)
+
+        supplement_enabled = ctk.BooleanVar(
+            value=bool(supplement_sec.get("enabled", False))
+        )
+        ctk.CTkCheckBox(
+            supplement_frame, text="补充批阅评语", variable=supplement_enabled, width=120,
+        ).grid(row=0, column=0, padx=(14, 6), pady=(12, 2), sticky="w")
+        ctk.CTkLabel(
+            supplement_frame,
+            text="自动为已批阅且暂无教师评语的日报、周报、月报、总结补充评语；每行一条，随机选取。",
+            text_color="gray",
+        ).grid(row=0, column=1, padx=(0, 14), pady=(12, 2), sticky="w")
+        supplement_textbox = ctk.CTkTextbox(supplement_frame, height=100, wrap="word")
+        supplement_textbox.grid(row=1, column=0, columnspan=2, padx=14, pady=(6, 12), sticky="ew")
+        supplement_textbox.insert("1.0", str(supplement_sec.get("comment_text", "") or ""))
+        self._review_vars["supplement_comment"] = {
+            "enabled": supplement_enabled, "comment_text": supplement_textbox,
         }
 
         for rtype in ("day", "week", "month"):
@@ -571,12 +831,11 @@ class App(ctk.CTk):
         self._cred_vars: dict = {}
         active_creds = self.cfg.get("credentials", {})
         fields = [
-            ("账号名称：", "name",     False, "用于区分多个账号，填姓名或备注均可"),
-            ("手机号：",   "phone",    False, "工学云账号绑定的手机号"),
-            ("登录密码：", "password", True,  "Token 失效时自动重登使用，可留空"),
-            ("Token：",    "token",    False, "当前登录凭证（见下方获取方法）"),
+            ("账号名称：", "name",     False),
+            ("手机号：",   "phone",    False),
+            ("登录密码：", "password", True),
         ]
-        for i, (lbl, key, is_pass, _hint) in enumerate(fields):
+        for i, (lbl, key, is_pass) in enumerate(fields):
             ctk.CTkLabel(outer, text=lbl, anchor="e", width=90).grid(
                 row=i, column=0, padx=(14, 6), pady=(14 if i == 0 else 6, 6), sticky="e"
             )
@@ -586,44 +845,61 @@ class App(ctk.CTk):
             )
             self._cred_vars[key] = var
 
-        # ── 一键导入 JSON 区 ──
-        imp_frame = ctk.CTkFrame(tab)
-        imp_frame.pack(fill="x", padx=4, pady=(8, 0))
-        imp_frame.columnconfigure(0, weight=1)
-
-        imp_hdr = ctk.CTkFrame(imp_frame, fg_color="transparent")
-        imp_hdr.pack(fill="x", padx=10, pady=(10, 4))
-        ctk.CTkLabel(
-            imp_hdr, text="📋  从浏览器一键导入",
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(side="left")
-        ctk.CTkButton(
-            imp_hdr, text="解析并填入", width=96, height=28,
-            command=self._import_from_json,
-        ).pack(side="right")
-
-        ctk.CTkLabel(
-            imp_frame,
-            text=(
-                "浏览器打开 https://p3.gongxueyun.com 登录后，按 F12 → Console，粘贴并回车：\n"
-                "JSON.stringify(JSON.parse(localStorage.getItem('userinfo')))\n"
-                "然后将输出内容粘贴到下方文本框，点击「解析并填入」即可自动填写所有字段。"
-            ),
-            text_color="gray", justify="left", font=ctk.CTkFont(size=11),
-        ).pack(fill="x", padx=10, pady=(0, 6))
-
-        self._import_textbox = ctk.CTkTextbox(imp_frame, height=80, font=ctk.CTkFont(family="Consolas", size=11))
-        self._import_textbox.pack(fill="x", padx=10, pady=(0, 10))
-
-        # ── 自动获取批次 ──
-        self._auto_fetch_btn = ctk.CTkButton(
-            tab, text="🔄  自动获取当前批次（batch_id）", height=32,
-            fg_color="#1a5f7a", hover_color="#144d63",
-            command=self._auto_fetch_batch,
+        # ── 登录按钮行 ──
+        login_row = ctk.CTkFrame(outer, fg_color='transparent')
+        login_row.grid(row=3, column=0, columnspan=2, padx=(14, 14), pady=(4, 12), sticky='ew')
+        login_row.columnconfigure(1, weight=1)
+        self._acct_login_btn = ctk.CTkButton(
+            login_row, text='🚀  登录', width=100, height=32,
+            fg_color='#1a6090', hover_color='#145070',
+            command=self._do_account_login,
         )
-        self._auto_fetch_btn.pack(fill="x", padx=4, pady=(6, 0))
-        self._batch_status_label = ctk.CTkLabel(tab, text="", text_color="gray", font=ctk.CTkFont(size=11))
-        self._batch_status_label.pack(fill="x", padx=14, pady=(2, 0))
+        self._acct_login_btn.grid(row=0, column=0, padx=(0, 10))
+        self._login_status_lbl = ctk.CTkLabel(
+            login_row, text='', text_color='gray', anchor='w')
+        self._login_status_lbl.grid(row=0, column=1, sticky='ew')
+
+        # ── 当前学年（批次）选择行 ──
+        batch_frame = ctk.CTkFrame(tab)
+        batch_frame.pack(fill="x", padx=4, pady=(8, 0))
+        batch_frame.columnconfigure(1, weight=1)
+        ctk.CTkLabel(batch_frame, text="当前学年：", anchor="e", width=90).grid(
+            row=0, column=0, padx=(14, 6), pady=10, sticky="e")
+        self._batch_var = ctk.StringVar(value="")
+        self._batch_menu = ctk.CTkOptionMenu(
+            batch_frame, variable=self._batch_var,
+            values=["（请先登录）"], width=260, state="disabled",
+            command=self._on_batch_select,
+        )
+        self._batch_menu.grid(row=0, column=1, padx=(0, 6), pady=10, sticky="ew")
+        ctk.CTkButton(
+            batch_frame, text="🔄", width=36, height=32,
+            command=self._refresh_batches,
+        ).grid(row=0, column=2, padx=(0, 14), pady=10)
+
+        # ── 实习计划选择行 ──
+        plan_frame = ctk.CTkFrame(tab)
+        plan_frame.pack(fill="x", padx=4, pady=(4, 0))
+        plan_frame.columnconfigure(1, weight=1)
+        ctk.CTkLabel(plan_frame, text="实习计划：", anchor="e", width=90).grid(
+            row=0, column=0, padx=(14, 6), pady=10, sticky="e")
+        self._plan_var = ctk.StringVar(value="")
+        self._plan_menu = ctk.CTkOptionMenu(
+            plan_frame, variable=self._plan_var,
+            values=["（请先选择学年）"], width=260, state="disabled",
+            command=self._on_plan_select,
+        )
+        self._plan_menu.grid(row=0, column=1, padx=(0, 6), pady=10, sticky="ew")
+
+        self._batch_status_lbl = ctk.CTkLabel(
+            tab, text='', text_color='gray', font=ctk.CTkFont(size=11), anchor='w')
+        self._batch_status_lbl.pack(fill='x', padx=20, pady=(0, 4))
+
+        self._batch_list: list[dict] = []
+        self._plan_list: list[dict] = []
+        # 若已登录，延迟加载批次列表
+        if active_creds.get('token') and active_creds.get('user_id'):
+            self.after(800, self._refresh_batches)
 
     def _get_account_display_names(self) -> list[str]:
         names = []
@@ -643,13 +919,21 @@ class App(ctk.CTk):
         self.cfg["credentials"] = active
         for key, var in self._cred_vars.items():
             var.set(str(active.get(key, "") or ""))
+        # 切换账号时刷新批次和登录状态
+        self._login_status_lbl.configure(text='', text_color='gray')
+        self._batch_menu.configure(values=['（请先登录）'], state='disabled')
+        self._plan_menu.configure(values=['（请先选择学年）'], state='disabled')
+        self._batch_list = []
+        self._plan_list = []
+        if active.get('token') and active.get('user_id'):
+            self._refresh_batches()
 
     def _add_account(self) -> None:
         n = len(self.cfg.get("accounts", [])) + 1
         new_acct = {
             "name": f"账号{n}", "phone": "", "password": "", "token": "",
             "user_id": "", "role_key": "adviser",
-            "batch_id": "", "teacher_id": "", "school_id": "",
+            "batch_id": "", "plan_id": "", "teacher_id": "", "school_id": "",
         }
         self.cfg.setdefault("accounts", []).append(new_acct)
         new_idx = len(self.cfg["accounts"]) - 1
@@ -674,94 +958,243 @@ class App(ctk.CTk):
         self._acct_sel_var.set(names[new_idx])
         self._on_account_switch(names[new_idx])
 
-    def _import_from_json(self) -> None:
-        raw = self._import_textbox.get("1.0", "end").strip()
-        if not raw:
-            messagebox.showwarning("提示", "请先将浏览器控制台输出粘贴到文本框中。")
+    # ── 账号登录（内嵌在账号设置Tab）────────────────────────────────────
+
+    def _set_login_status(self, text: str, color: str = 'gray') -> None:
+        self._login_status_lbl.configure(text=text, text_color=color)
+
+    def _do_account_login(self) -> None:
+        phone = self._cred_vars['phone'].get().strip()
+        pwd = self._cred_vars['password'].get().strip()
+        if not phone or not pwd:
+            messagebox.showwarning('提示', '请先填写手机号和登录密码。')
             return
-        try:
-            import json
-            ui = json.loads(raw)
-        except Exception as e:
-            messagebox.showerror("解析失败", f"JSON 格式错误：{e}")
-            return
+        self._acct_login_btn.configure(state='disabled')
+        self._set_login_status('正在获取验证码...', '#f0a500')
 
-        token = ui.get("token", "")
-        user_id = str(ui.get("userId", ""))
-        role_key = ui.get("roleKey", "adviser")
-        phone = ui.get("phone", "")
-        name = ui.get("nikeName", "") or phone
-        org = ui.get("orgJson", {})
-        teacher_id = org.get("teacheId", "") or org.get("teacherId", "")
-        school_id = org.get("schoolId", "")
+        def work():
+            try:
+                from captcha import fetch_captcha, auto_solve
+                cap = fetch_captcha()
+                self.after(0, lambda: self._set_login_status('正在识别验证码...', '#f0a500'))
+                verif = auto_solve(cap)
+                if verif:
+                    self.after(0, lambda: self._set_login_status('验证成功，正在登录...', '#4caf50'))
+                    self._execute_login(phone, pwd, verif, cap.client_uid)
+                else:
+                    self.after(0, lambda c=cap: self._open_captcha_dialog(phone, pwd, c))
+            except Exception as exc:
+                self.after(0, lambda e=exc: (
+                    self._set_login_status(f'失败: {e}', '#f44336'),
+                    self._acct_login_btn.configure(state='normal'),
+                ))
+                logging.error('获取验证码失败: %s', exc)
 
-        # 更新当前账号字段
-        idx = int(self.cfg.get("active_account", 0))
-        acct = self.cfg["accounts"][idx]
-        updates = {
-            "name": name or acct.get("name", ""),
-            "phone": phone or acct.get("phone", ""),
-            "token": token or acct.get("token", ""),
-            "user_id": user_id or acct.get("user_id", ""),
-            "role_key": role_key or acct.get("role_key", "adviser"),
-            "teacher_id": teacher_id or acct.get("teacher_id", ""),
-            "school_id": school_id or acct.get("school_id", ""),
-        }
-        acct.update(updates)
-        self.cfg["credentials"] = acct
+        threading.Thread(target=work, daemon=True).start()
 
-        # 刷新 UI 字段
+    def _open_captcha_dialog(self, phone: str, pwd: str, cap) -> None:
+        self._set_login_status('自动识别失败，请手动拖动滑块', '#f0a500')
+        self._acct_login_btn.configure(state='normal')
+
+        def on_verified(verif: str, client_uid: str):
+            self._acct_login_btn.configure(state='disabled')
+            self._set_login_status('验证成功，正在登录...', '#4caf50')
+            self._execute_login(phone, pwd, verif, client_uid)
+
+        CaptchaDialog(self, cap, on_verified=on_verified).focus()
+
+    def _execute_login(self, phone: str, pwd: str, verif: str, client_uid: str) -> None:
+        def work():
+            try:
+                from captcha import login_with_captcha
+                result = login_with_captcha(phone, pwd, verif, client_uid)
+                if result.get('code') == 200:
+                    data = result['data']
+                    self.after(0, lambda: self._on_account_login_ok(phone, pwd, data))
+                else:
+                    msg = result.get('msg', '未知错误')
+                    self.after(0, lambda m=msg: (
+                        self._set_login_status(f'登录失败: {m}', '#f44336'),
+                        self._acct_login_btn.configure(state='normal'),
+                    ))
+            except Exception as exc:
+                self.after(0, lambda e=exc: (
+                    self._set_login_status(f'登录异常: {e}', '#f44336'),
+                    self._acct_login_btn.configure(state='normal'),
+                ))
+                logging.error('登录请求异常: %s', exc)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_account_login_ok(self, phone: str, pwd: str, data: dict) -> None:
+        idx = int(self.cfg.get('active_account', 0))
+        acct = self.cfg['accounts'][idx]
+        acct['phone'] = phone
+        acct['password'] = pwd
+        acct['token'] = data.get('token', '')
+        acct['user_id'] = str(data.get('userId', ''))
+        nikename = data.get('nikeName', '') or data.get('username', '')
+        if nikename:
+            acct['name'] = nikename
+        org = data.get('orgJson', {}) or {}
+        if org.get('teacheId') or org.get('teacherId'):
+            acct['teacher_id'] = org.get('teacheId') or org.get('teacherId', '')
+        if org.get('schoolId'):
+            acct['school_id'] = org['schoolId']
+        self.cfg['credentials'] = acct
+        # 刷新字段和账号选择器
         for key, var in self._cred_vars.items():
-            var.set(str(acct.get(key, "") or ""))
-        # 更新账号名称选择器
+            var.set(str(acct.get(key, '') or ''))
         names = self._get_account_display_names()
         self._account_names_var = names
         self._acct_selector.configure(values=names)
         self._acct_sel_var.set(names[idx])
+        self._acct_login_btn.configure(state='normal')
+        self._set_login_status(f'✅ 已登录：{acct.get("name", phone)}', '#4caf50')
+        logging.info('登录成功，userId=%s', acct['user_id'])
+        self._refresh_batches()
 
-        messagebox.showinfo("导入成功", f"已自动填写账号信息。\n姓名: {name}\n手机: {phone}\n\n请点击「🔄 自动获取当前批次」以补全 batch_id。")
+    # ── 批次管理 ──────────────────────────────────────────────────────────
 
-    def _auto_fetch_batch(self) -> None:
-        token = self._cred_vars["token"].get().strip()
-        user_id = self.cfg.get("credentials", {}).get("user_id", "")
-        role_key = self.cfg.get("credentials", {}).get("role_key", "adviser")
+    def _refresh_batches(self) -> None:
+        acct = self.cfg.get('credentials', {})
+        token = acct.get('token', '')
+        user_id = acct.get('user_id', '')
+        role_key = acct.get('role_key', 'adviser')
         if not token or not user_id:
-            messagebox.showwarning("缺少信息", "请先填写 Token（可通过「解析并填入」获取）。")
+            self._batch_status_lbl.configure(
+                text='⚠️ 请先登录获取 Token', text_color='#f0a500')
             return
-        self._auto_fetch_btn.configure(state="disabled", text="获取中...")
-        self._batch_status_label.configure(text="")
+        self._batch_status_lbl.configure(text='正在加载批次列表...', text_color='gray')
 
-        def fetch():
+        def work():
             try:
                 from api import GxyAPI
                 info = GxyAPI.discover_credentials(token, user_id, role_key)
-                batch_id = info.get("batch_id", "")
-                school_id = info.get("school_id", "")
-
-                def update():
-                    idx = int(self.cfg.get("active_account", 0))
-                    acct = self.cfg["accounts"][idx]
-                    if batch_id:
-                        acct["batch_id"] = batch_id
-                    if school_id:
-                        acct["school_id"] = school_id
-                    self.cfg["credentials"] = acct
-                    msg = f"✅ batch_id 已更新：{batch_id}" if batch_id else "⚠️ 未找到当前批次，请手动填写"
-                    self._batch_status_label.configure(
-                        text=msg, text_color="#4caf50" if batch_id else "#f44336"
-                    )
-                    self._auto_fetch_btn.configure(state="normal", text="🔄  自动获取当前批次（batch_id）")
-
-                self.after(0, update)
+                batches = info.get('batches', [])
+                auto_bid = info.get('batch_id', '')
+                school_id = info.get('school_id', '')
+                self.after(0, lambda: self._populate_batches(batches, auto_bid, school_id))
             except Exception as exc:
-                self.after(0, lambda: (
-                    self._batch_status_label.configure(text=f"获取失败: {exc}", text_color="#f44336"),
-                    self._auto_fetch_btn.configure(state="normal", text="🔄  自动获取当前批次（batch_id）"),
+                msg = str(exc)
+                self.after(0, lambda m=msg: (
+                    self._batch_status_lbl.configure(
+                        text=f'⚠️ 获取失败: {m}', text_color='#f44336'),
+                    self._batch_menu.configure(values=['（获取失败，请重新登录）'], state='disabled'),
                 ))
-                logging.error("自动获取批次失败: %s", exc)
+                logging.warning('获取批次列表失败: %s', exc)
 
-        import threading
-        threading.Thread(target=fetch, daemon=True).start()
+        threading.Thread(target=work, daemon=True).start()
+
+    def _populate_batches(self, batches: list, auto_batch_id: str, school_id: str) -> None:
+        self._batch_list = batches
+        idx = int(self.cfg.get('active_account', 0))
+        acct = self.cfg['accounts'][idx]
+        current_bid = acct.get('batch_id', '') or auto_batch_id
+        if school_id:
+            acct['school_id'] = school_id
+
+        if batches:
+            names = [b['batchName'] for b in batches]
+            self._batch_menu.configure(values=names, state='normal')
+            selected_name = names[0]
+            for b in batches:
+                if b['batchId'] == current_bid:
+                    selected_name = b['batchName']
+                    break
+            self._batch_var.set(selected_name)
+            for b in batches:
+                if b['batchName'] == selected_name:
+                    acct['batch_id'] = b['batchId']
+                    break
+            self._batch_status_lbl.configure(
+                text=f'✅ 已加载 {len(batches)} 个学年', text_color='#4caf50')
+            # 加载当前学年的实习计划
+            self._refresh_plans(acct['batch_id'])
+        else:
+            self._batch_menu.configure(values=['（无可用学年）'], state='disabled')
+            self._batch_status_lbl.configure(
+                text='⚠️ Token 已失效，请点击「登录」重新获取', text_color='#f44336')
+
+        self.cfg['credentials'] = acct
+
+    def _on_batch_select(self, name: str) -> None:
+        for b in self._batch_list:
+            if b['batchName'] == name:
+                idx = int(self.cfg.get('active_account', 0))
+                acct = self.cfg['accounts'][idx]
+                acct['batch_id'] = b['batchId']
+                acct['plan_id'] = ''    # 清空计划，等待重新选择
+                self.cfg['credentials'] = acct
+                logging.info('学年已切换: %s (%s)', name, b['batchId'])
+                self._refresh_plans(b['batchId'])
+                break
+
+    def _refresh_plans(self, batch_id: str) -> None:
+        """异步加载指定学年下的实习计划列表。"""
+        self._plan_menu.configure(values=['正在加载...'], state='disabled')
+        cfg = self.cfg
+
+        def work():
+            try:
+                from api import GxyAPI
+                api = GxyAPI(cfg)
+                plans = api.get_plans_by_batch(batch_id)
+                self.after(0, lambda: self._populate_plans(plans))
+            except Exception as exc:
+                msg = str(exc)
+                self.after(0, lambda m=msg: self._plan_menu.configure(
+                    values=[f'获取失败: {m[:30]}'], state='disabled'))
+                logging.warning('获取实习计划失败: %s', exc)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _populate_plans(self, plans: list) -> None:
+        self._plan_list = plans
+        idx = int(self.cfg.get('active_account', 0))
+        acct = self.cfg['accounts'][idx]
+        current_pid = acct.get('plan_id', '')
+
+        if plans:
+            names = [p.get('planName') or p.get('name') or f"计划{i+1}" for i, p in enumerate(plans)]
+            self._plan_menu.configure(values=names, state='normal')
+            # 优先选择上次保存的计划
+            selected_name = names[0]
+            for p in plans:
+                pname = p.get('planName') or p.get('name') or ''
+                if p.get('planId') == current_pid:
+                    selected_name = pname
+                    break
+            self._plan_var.set(selected_name)
+            # 写入 planId
+            for p in plans:
+                pname = p.get('planName') or p.get('name') or ''
+                if pname == selected_name:
+                    acct['plan_id'] = p.get('planId', '')
+                    break
+            self.cfg['credentials'] = acct
+            self._batch_status_lbl.configure(
+                text=f'✅ 已加载 {len(plans)} 个实习计划', text_color='#4caf50')
+        else:
+            self._plan_menu.configure(values=['（全部计划）'], state='normal')
+            self._plan_var.set('（全部计划）')
+            acct['plan_id'] = ''
+            self.cfg['credentials'] = acct
+            self._batch_status_lbl.configure(
+                text='ℹ️ 当前学年无实习计划（不按计划筛选）', text_color='gray')
+
+    def _on_plan_select(self, name: str) -> None:
+        for p in self._plan_list:
+            pname = p.get('planName') or p.get('name') or ''
+            if pname == name:
+                idx = int(self.cfg.get('active_account', 0))
+                acct = self.cfg['accounts'][idx]
+                acct['plan_id'] = p.get('planId', '')
+                self.cfg['credentials'] = acct
+                logging.info('实习计划已切换: %s (%s)', name, p.get('planId', ''))
+                break
+                logging.info('批次已切换: %s (%s)', name, b['batchId'])
+                break
 
     # ── Tab: 手动批阅 ─────────────────────────────────────────────────────────
 
@@ -823,11 +1256,12 @@ class App(ctk.CTk):
             try:
                 from api import GxyAPI
                 api = GxyAPI(cfg)
-                items = (
-                    api.get_pending_replacements()
-                    if item_type == "replace"
-                    else api.get_pending_reports(item_type)
-                )
+                if item_type == "replace":
+                    items = api.get_pending_replacements()
+                elif item_type == "assessment":
+                    items = api.get_pending_assessments()
+                else:
+                    items = api.get_pending_reports(item_type)
                 self.after(0, lambda: self._test_populate(items, item_type))
             except Exception as exc:
                 self.after(0, lambda: self._test_status_label.configure(
@@ -844,7 +1278,7 @@ class App(ctk.CTk):
 
     def _test_populate(self, items: list, item_type: str) -> None:
         cnt = len(items)
-        type_cn = {"day": "日报", "week": "周报", "month": "月报", "replace": "补签申请"}.get(item_type, "")
+        type_cn = {"day": "日报", "week": "周报", "month": "月报", "replace": "补签申请", "summary": "总结报告", "assessment": "实习成绩考核"}.get(item_type, "")
         if not items:
             self._test_status_label.configure(
                 text=f"暂无待批阅{type_cn}", text_color=("gray40", "gray70"),
@@ -878,17 +1312,35 @@ class App(ctk.CTk):
         else:
             cn = self._pending_type_cn
             self._test_status_label.configure(
-                text=f"共 {len(items)} 条待批阅{cn}",
+                text=f"共 {len(items)} 条待{'打分' if self._pending_item_type == 'assessment' else '批阅'}{cn}",
                 text_color=("gray40", "gray70"),
             )
             self._test_approve_all_btn.configure(state="normal")
 
     def _test_do_single(self, row: TestRow, item_type: str) -> None:
+        import random as _random
         row.set_busy(True)
         cfg = self.cfg
-        # ⚠️ tkinter StringVar.get() 必须在主线程读取，在此处预先捕获
+        # ⚠️ tkinter 变量必须在主线程读取
         comment = row.get_comment()
         star_num = row.get_star_num()
+        score = row.get_score()
+
+        # 若用户未填写分数，从配置中随机生成
+        if item_type == "summary" and score < 0:
+            rv = self.cfg.get("review", {})
+            sc = (rv.get("reports") or {}).get("summary", {})
+            score = _random.randint(
+                int(sc.get("min_score", 60) or 60),
+                int(sc.get("max_score", 100) or 100),
+            )
+        elif item_type == "assessment" and score < 0:
+            rv = self.cfg.get("review", {})
+            sc = rv.get("assessment", {})
+            score = _random.randint(
+                int(sc.get("min_score", 60) or 60),
+                int(sc.get("max_score", 100) or 100),
+            )
 
         def work():
             try:
@@ -902,6 +1354,13 @@ class App(ctk.CTk):
                         or ""
                     )
                     result = api.approve_replacements([str(aid)], comment) if aid else {"code": 0}
+                elif item_type == "summary":
+                    rid = row.item.get("reportId") or row.item.get("id") or ""
+                    result = api.review_summary_report(str(rid), score, comment) if rid else {"code": 0}
+                elif item_type == "assessment":
+                    sid = row.item.get("studentId", "")
+                    pid = row.item.get("planId", "")
+                    result = api.score_assessment(sid, pid, score, comment) if sid and pid else {"code": 0}
                 else:
                     rid = row.item.get("reportId") or row.item.get("id") or ""
                     result = (
@@ -920,17 +1379,37 @@ class App(ctk.CTk):
         threading.Thread(target=work, daemon=True).start()
 
     def _test_approve_all(self) -> None:
+        import random as _random
         item_type = TEST_TYPE_MAP.get(self._test_type_var.get(), "week")
         pending = [r for r in self._test_rows if not r.is_done()]
         if not pending:
             return
         self._test_approve_all_btn.configure(state="disabled")
 
+        rv = self.cfg.get("review", {})
+
         # 在主线程预先读取所有 tkinter 变量，避免子线程访问 UI
         tasks = []
         for row in pending:
             row.set_busy(True)
-            tasks.append((row, row.get_comment(), row.get_star_num()))
+            comment = row.get_comment()
+            star = row.get_star_num()
+            score = row.get_score()
+
+            if item_type == "summary" and score < 0:
+                sc = (rv.get("reports") or {}).get("summary", {})
+                score = _random.randint(
+                    int(sc.get("min_score", 60) or 60),
+                    int(sc.get("max_score", 100) or 100),
+                )
+            elif item_type == "assessment" and score < 0:
+                sc = rv.get("assessment", {})
+                score = _random.randint(
+                    int(sc.get("min_score", 60) or 60),
+                    int(sc.get("max_score", 100) or 100),
+                )
+
+            tasks.append((row, comment, star, score))
 
         cfg = self.cfg
 
@@ -938,7 +1417,7 @@ class App(ctk.CTk):
             from concurrent.futures import ThreadPoolExecutor
             from api import GxyAPI
 
-            def do_one(row, comment, star):
+            def do_one(row, comment, star, score):
                 try:
                     api = GxyAPI(cfg)
                     if item_type == "replace":
@@ -949,6 +1428,13 @@ class App(ctk.CTk):
                             or ""
                         )
                         result = api.approve_replacements([str(aid)], comment) if aid else {"code": 0}
+                    elif item_type == "summary":
+                        rid = row.item.get("reportId") or row.item.get("id") or ""
+                        result = api.review_summary_report(str(rid), score, comment) if rid else {"code": 0}
+                    elif item_type == "assessment":
+                        sid = row.item.get("studentId", "")
+                        pid = row.item.get("planId", "")
+                        result = api.score_assessment(sid, pid, score, comment) if sid and pid else {"code": 0}
                     else:
                         rid = row.item.get("reportId") or row.item.get("id") or ""
                         result = api.review_report(str(rid), comment, star_num=star) if rid else {"code": 0}
@@ -1048,6 +1534,15 @@ class App(ctk.CTk):
                 "star_num": STAR_MAP.get(v["star"].get(), 0),
             }
         rv = self._review_vars["replacement"]
+        sv = self._review_vars.get("summary", {})
+        av = self._review_vars.get("assessment", {})
+        if sv:
+            reports_cfg["summary"] = {
+                "enabled": sv["enabled"].get(),
+                "min_score": int(sv["min_score"].get() or 60),
+                "max_score": int(sv["max_score"].get() or 100),
+                "comment": sv["comment"].get(),
+            }
         self.cfg["review"] = {
             "reports": reports_cfg,
             "replacement": {
@@ -1055,6 +1550,19 @@ class App(ctk.CTk):
                 "comment": rv["comment"].get(),
             },
         }
+        if av:
+            self.cfg["review"]["assessment"] = {
+                "enabled": av["enabled"].get(),
+                "min_score": int(av["min_score"].get() or 60),
+                "max_score": int(av["max_score"].get() or 100),
+                "comment": av["comment"].get(),
+            }
+        cv = self._review_vars.get("supplement_comment", {})
+        if cv:
+            self.cfg["review"]["supplement_comment"] = {
+                "enabled": cv["enabled"].get(),
+                "comment_text": cv["comment_text"].get("1.0", "end-1c"),
+            }
         # 定时设置
         self.cfg["schedule"] = {
             "run_at": self._run_at_var.get().strip(),
@@ -1093,7 +1601,6 @@ class App(ctk.CTk):
             "name":     cv["name"].get().strip() or acct.get("phone", f"账号{idx + 1}"),
             "phone":    cv["phone"].get().strip(),
             "password": cv["password"].get(),
-            "token":    cv["token"].get().strip(),
         })
         accounts[idx] = acct
         self.cfg["accounts"] = accounts
@@ -1264,37 +1771,8 @@ class App(ctk.CTk):
         content_box.pack(fill="both", expand=True, padx=12, pady=(0, 4))
 
         pre_content = item.get("content") or ""
-        if pre_content:
-            content_box.insert("1.0", pre_content)
-            content_box.configure(state="disabled")
-        else:
-            content_box.insert("1.0", "加载中...")
-            cfg = self.cfg
-
-            def fetch_content():
-                rid = item.get("reportId") or item.get("id") or ""
-                try:
-                    from api import GxyAPI
-                    api = GxyAPI(cfg)
-                    detail = api.get_report_detail(rid) if rid and not is_replace else {}
-                    text = detail.get("content") or "（报告正文为空）"
-                except Exception as exc:
-                    text = f"加载失败: {exc}"
-
-                def update():
-                    try:
-                        content_box.configure(state="normal")
-                        content_box.delete("1.0", "end")
-                        content_box.insert("1.0", text)
-                        content_box.configure(state="disabled")
-                    except Exception:
-                        pass
-                try:
-                    win.after(0, update)
-                except Exception:
-                    pass
-
-            threading.Thread(target=fetch_content, daemon=True).start()
+        content_box.insert("1.0", pre_content or "加载中...")
+        content_box.configure(state="disabled")
 
         # ── 已有教师评语 ──
         if not is_replace:
@@ -1304,19 +1782,58 @@ class App(ctk.CTk):
                 win, text="💬  教师评语",
                 font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
             ).pack(fill="x", padx=16, pady=(4, 2))
-            if existing_comment or star_num_val:
-                stars = "★" * int(star_num_val) + "☆" * (5 - int(star_num_val))
-                comment_text = (f"{stars}  {star_num_val}星\n{existing_comment}".strip()
-                                if star_num_val else existing_comment)
-                cbox = ctk.CTkTextbox(win, height=64, font=ctk.CTkFont(size=12))
-                cbox.pack(fill="x", padx=12, pady=(0, 12))
-                cbox.insert("1.0", comment_text)
-                cbox.configure(state="disabled")
-            else:
-                ctk.CTkLabel(
-                    win, text="（暂无评语）",
-                    text_color="gray", font=ctk.CTkFont(size=12), anchor="w",
-                ).pack(fill="x", padx=16, pady=(0, 12))
+            cbox = ctk.CTkTextbox(win, height=64, font=ctk.CTkFont(size=12))
+            cbox.pack(fill="x", padx=12, pady=(0, 12))
+
+            def format_comment(comment: str, star_num: object) -> str:
+                try:
+                    stars_num = max(0, min(5, int(star_num or 0)))
+                except (TypeError, ValueError):
+                    stars_num = 0
+                if stars_num:
+                    stars = "★" * stars_num + "☆" * (5 - stars_num)
+                    return f"{stars}  {stars_num}星\n{comment}".strip()
+                return comment or "（暂无评语）"
+
+            cbox.insert("1.0", format_comment(existing_comment, star_num_val))
+            cbox.configure(state="disabled")
+
+        # 报告详情中的评语字段比列表可靠，始终回读并更新正文与评语展示。
+        if not is_replace:
+            cfg = self.cfg
+
+            def fetch_detail():
+                rid = item.get("reportId") or item.get("id") or ""
+                try:
+                    from api import GxyAPI
+                    api = GxyAPI(cfg)
+                    detail = api.get_report_detail(rid) if rid else {}
+                    text = detail.get("content") or pre_content or "（报告正文为空）"
+                    comment = api.get_teacher_comment(detail)
+                    stars = detail.get("starNum") or star_num_val
+                except Exception as exc:
+                    text = pre_content or f"加载失败: {exc}"
+                    comment = existing_comment
+                    stars = star_num_val
+
+                def update():
+                    try:
+                        content_box.configure(state="normal")
+                        content_box.delete("1.0", "end")
+                        content_box.insert("1.0", text)
+                        content_box.configure(state="disabled")
+                        cbox.configure(state="normal")
+                        cbox.delete("1.0", "end")
+                        cbox.insert("1.0", format_comment(comment, stars))
+                        cbox.configure(state="disabled")
+                    except Exception:
+                        pass
+                try:
+                    win.after(0, update)
+                except Exception:
+                    pass
+
+            threading.Thread(target=fetch_detail, daemon=True).start()
 
     # ── Tab: 关于 ─────────────────────────────────────────────────────────────
 
